@@ -135,7 +135,7 @@ Open 1 or more of the **failing** runs and carefully read through the agent's wo
 - Does it test its own code? What does it miss?
 - Are there patterns across multiple failures?
 
-Understanding *why* the agent fails is the key to this takehome. The agent is not randomly broken — there are specific, identifiable reasons it produces incorrect implementations. Your analysis of these reasons will directly inform how you modify the spec.
+Understanding *why* the agent fails is the key to this takehome. The agent is not randomly broken — there are specific, identifiable reasons it produces incorrect implementations. Your analysis of these reasons will directly inform how you modify the spec. We strongly recommend working backwards--look at the final implementation the agent created at the end of the trace, and compare this to the golden solution.
 
 ---
 
