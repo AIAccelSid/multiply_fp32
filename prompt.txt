@@ -1,0 +1,6 @@
+Complete the given partial Systemverilog RTL code based on the specification doc/spec.md. The RTL code should be synthesizable.
+Make sure that the name of the files match with the following:
+- Top:        multiply_fp32.sv
+
+
+**Important**: This environment uses Icarus Verilog for testing. Avoid using SystemVerilog Assertion (SVA) property/sequence syntax if adding assertions.$

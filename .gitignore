@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+tests/sim_build/
+*.vvp
+*.xml
+.pytest_cache/
