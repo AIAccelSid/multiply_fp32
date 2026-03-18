@@ -25,22 +25,25 @@ Install the following if you don't already have them:
 
 **Windows users:** You will need WSL. Follow the instructions in: [WSL Guide](https://docs.google.com/document/d/1LF0nSO5fTD7e_OC6GThE4AWRrnbPHl7Sz-8rnBxjEiM/edit?usp=sharing) (sections 3.1–3.5).
 
-You will also need API keys. Email your liaison to receive:
-- An **Anthropic API key** (for calling the AI agent)
-- A **GitHub token** with access to the `phinitylabs` org
+You will also need an **Anthropic API key** (for calling the AI agent). Email your liaison to receive one.
 
 ---
 
-## Section 1: Understanding the Task (~20 min)
+## Section 1: Understanding the Task (~30 min)
 
 ### What the agent sees
 
-Clone the task repository:
+Fork the task repository to your own GitHub account, then clone your fork:
+
+1. Go to [https://github.com/phinitylabs/multiply_fp32](https://github.com/phinitylabs/multiply_fp32) and click **Fork**. Make sure the fork has **public** visibility.
+2. Clone your fork:
 
 ```bash
-git clone https://github.com/phinitylabs/multiply_fp32.git
+git clone https://github.com/<your-github-username>/multiply_fp32.git
 cd multiply_fp32
 ```
+
+Forking gives you your own copy of the repo (with all branches included) where you can push your spec modifications.
 
 The task is an **IEEE-754 FP32 floating-point multiplier**. The agent receives:
 
@@ -135,7 +138,7 @@ Open 1 or more of the **failing** runs and carefully read through the agent's wo
 - Does it test its own code? What does it miss?
 - Are there patterns across multiple failures?
 
-Understanding *why* the agent fails is the key to this takehome. The agent is not randomly broken — there are specific, identifiable reasons it produces incorrect implementations. Your analysis of these reasons will directly inform how you modify the spec. We strongly recommend working backwards--look at the final implementation the agent created at the end of the trace, and compare this to the golden solution.
+Understanding *why* the agent fails is the key to this takehome. The agent is not randomly broken — there are specific, identifiable reasons it produces incorrect implementations. Your analysis of these reasons will directly inform how you modify the spec. We strongly recommend working backwards--look at the final implementation the agent created at the end of the trace, and compare this to the golden solution. You can find the final implementation in HUD by scrolling to the bottom of the trace and looking through the code window in the final cell (on the left side of the transcript).
 
 ---
 
@@ -159,27 +162,59 @@ Each time you make a change, you should test it by running on HUD (Section 5).
 
 ### One-time framework setup
 
-Clone the evaluation framework:
+Clone the evaluation framework and install its dependencies:
 
 ```bash
-git clone https://github.com/phinitylabs/verilog-eval-benchmark.git
-cd verilog-eval-benchmark
+git clone https://github.com/phinitylabs/verilog-coding-template.git
+cd verilog-coding-template
 uv sync
 ```
 
-Set your API keys:
+Set your API keys. Your HUD API key can be found on [hud.ai](http://hud.ai) — click "Phinity Labs" in the top right, then go to the "API Keys" tab.
 
 ```bash
-hud set HUD_API_KEY=<your HUD key from hud.ai → Phinity Labs → API Keys>
+hud set HUD_API_KEY=<your HUD key>
 hud set ANTHROPIC_API_KEY=<your Anthropic key from liaison>
-export GITHUB_TOKEN=<your GitHub token>
 ```
 
-The problem `multiply_fp32_detailed` is already registered in the framework. After you modify the spec, you need to update the branches, rebuild the Docker image, and run.
+**Register the problem.** Open `src/hud_controller/problems/basic.py` and append:
+
+```python
+PROBLEM_REGISTRY.append(
+    ProblemSpec(
+        id="multiply_fp32_detailed",
+        description="""Complete the implementation in sources/multiply_fp32.sv based on the specification in doc/spec.md.
+The RTL code should be synthesizable. Make sure the filename remains sources/multiply_fp32.sv.
+This environment uses Icarus Verilog for testing. Avoid using SystemVerilog Assertion (SVA) property/sequence syntax.
+""",
+        difficulty="hard",
+        base="multiply_fp32_detailed_baseline",
+        test="multiply_fp32_detailed_test",
+        golden="multiply_fp32_detailed_golden",
+        test_files=["tests/test_multiply_fp32.py"],
+    )
+)
+```
+
+The branch names (`base`, `test`, `golden`) must exactly match the branches in your fork. Since forking preserves all branches, these already exist.
+
+**Point the Dockerfile at your fork.** Open `Dockerfile` and find the `REPO_URL` line (near line 102):
+
+```dockerfile
+ARG REPO_URL=https://github.com/aadinash/test-takehome.git
+```
+
+Change it to:
+
+```dockerfile
+ARG REPO_URL=https://github.com/<your-github-username>/multiply_fp32.git
+```
+
+Since your fork is public, Docker can clone it without any authentication token.
 
 ### After each spec modification
 
-**1. Update the branches.** From your task repo (`multiply_fp32`), commit your spec change and push to both the baseline and test branches:
+**1. Update the branches.** From your fork (`multiply_fp32`), commit your spec change and push to both the baseline and test branches:
 
 ```bash
 cd /path/to/multiply_fp32
@@ -194,22 +229,11 @@ git cherry-pick <commit-hash-from-above>
 git push origin multiply_fp32_detailed_test
 ```
 
-**2. Rebuild the Docker image.** From the eval framework repo:
+**2. Rebuild the Docker image.** Back in the framework repo, first increment the cache-buster in the `Dockerfile` so Docker pulls fresh code from your fork (find the `ENV random=random6` line near the `REPO_URL` and change the number, e.g. `random7`, `random8`, etc.). Then build:
 
 ```bash
-cd /path/to/verilog-eval-benchmark
-docker build --no-cache --platform linux/amd64 \
-  -t verilog_multiply_fp32_detailed \
-  --build-arg PROBLEM_REPO=multiply_fp32 \
-  --build-arg BASELINE_BRANCH=multiply_fp32_detailed_baseline \
-  --build-arg TEST_BRANCH=multiply_fp32_detailed_test \
-  --build-arg GOLDEN_BRANCH=multiply_fp32_detailed_golden \
-  --build-arg PROBLEM_ID=multiply_fp32_detailed \
-  --build-arg CACHEBUST=$(date +%s) \
-  --build-arg CACHEBUST_GRADING=$(date +%s) \
-  --build-arg USE_LOCAL_GRADING=1 \
-  --build-arg HINTS=none \
-  --secret id=github_token,env=GITHUB_TOKEN .
+cd /path/to/verilog-coding-template
+uv run utils/imagectl3.py verilog_ -b --ids multiply_fp32_detailed
 ```
 
 **3. Validate** (confirm golden passes, baseline fails):
@@ -218,20 +242,19 @@ docker build --no-cache --platform linux/amd64 \
 uv run utils/imagectl3.py verilog_ -v --ids multiply_fp32_detailed
 ```
 
-**4. Push the image and run** (to run 10 attempts):
+**4. Generate config and run** (to run 10 attempts):
 
 ```bash
-docker tag verilog_multiply_fp32_detailed <your-dockerhub-username>/verilog_multiply_fp32_detailed
-docker push <your-dockerhub-username>/verilog_multiply_fp32_detailed
+uv run utils/imagectl3.py verilog_ -j --ids multiply_fp32_detailed
 ```
 
-Update `remote-claude-hud.json` to point to your pushed image (the `Mcp-Image` field), then:
+This generates `local-claude-hud.json` with the correct problem entry. Now run:
 
 ```bash
-uv run hud eval remote-claude-hud.json claude \
+uv run hud eval local-claude-hud.json claude \
   --model claude-sonnet-4-20250514 \
   --max-steps 100 \
-  --full --remote --group-size 10 -y
+  --full --group-size 10
 ```
 
 This will give you a HUD link to view the results. Iterate until you achieve 40–70% pass rate.
@@ -261,4 +284,4 @@ Once you have achieved a pass rate between 40% and 70%, email your liaison with:
 
 ---
 
-This takehome should take approximately **4–6 hours total**. The most important part is the analysis — we want to see that you can diagnose agent failures and reason about how to guide an AI model to produce correct hardware implementations.
+This takehome should take approximately **5–8 hours total**. The most important part is the analysis — we want to see that you can diagnose agent failures and reason about how to guide an AI model to produce correct hardware implementations.
