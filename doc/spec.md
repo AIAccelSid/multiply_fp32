@@ -108,7 +108,16 @@ All stage actions are performed inside a single sequential always block using `c
 - `sticky = OR(product[23:0])`
 
 ### Stage 6 — Normalize + Round-to-Nearest-Even (RNE)
-Normalize the result mantissa and apply IEEE-754 round-to-nearest-even
+This stage performs:
+1. **Underflow alignment** toward exponent -126:
+   - Computes shift amount `sh = (-126 - z_e)` when `z_e < -126`.
+   - Shifts mantissa right and accumulates shifted-out bits into sticky.
+2. **Normalize** if MSB missing:
+   - Left-shifts mantissa while adjusting exponent, carrying guard into LSB.
+3. **RNE rounding**:
+   - If `G == 1` and `(R || S || LSB)` then increment mantissa.
+   - Handles carry-out from rounding:
+     - If rounding overflows mantissa, set mantissa to 0x800000 and increment exponent.
 
 ### Stage 7 — Pack
 - For normal path:
