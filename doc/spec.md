@@ -1,171 +1,109 @@
 # fmultiplier — FP32 Multiplier (Handshake, Multi-Cycle, IEEE-754)
 
 ## Overview
-`fmultiplier` is a **multi-cycle** single-precision floating-point multiplier that accepts one operation at a time using a **valid/out_valid** handshake. Internally it runs a staged pipeline controlled by a small FSM (`counter`) and produces a 32-bit IEEE-754 binary32 result.
+`fmultiplier` is a **multi-cycle** single-precision floating-point multiplier using a valid/out_valid handshake. It produces bit-accurate IEEE-754 results for **normal numbers only** (exponent 1–254). Special cases (subnormals/inf/NaN) can be ignored — the testbench uses only normal inputs.
 
-This design currently targets:
-- **Bit-accurate results for normal FP32 numbers** (typical IEEE-754 behavior with round-to-nearest-even),
-- Deterministic latency (fixed number of cycles from `valid` to `out_valid`),
-- The design behaves as: z = a*b 
-- z, a and b are single precision 32-bit IEEE-754 numbers
+The design must be a **7-stage pipeline** controlled by `counter` (1 to 7). `out_valid` asserts exactly 7 cycles after a `valid` pulse when idle.
 
----
+## Interface (do not change)
+```verilog
+module fmultiplier (
+    input wire clk,
+    input wire rst,
+    input wire valid,           // 1-cycle start pulse
+    input wire [31:0] a, b,
+    output reg [31:0] z,
+    output reg out_valid        // 1-cycle pulse when result ready
+);
+Pipeline Stages (follow exactly — use non‑blocking <=)
+Stage 1 (counter=1) — Unpack
+verilog
+a_s <= a_r[31]; b_s <= b_r[31];
+a_e <= $signed(a_r[30:23]) - 10'd127;
+b_e <= $signed(b_r[30:23]) - 10'd127;
+a_m <= {1'b0, a_r[22:0]};
+b_m <= {1'b0, b_r[22:0]};
+Stage 2 (counter=2) — Hidden bit
+verilog
+if (a_r[30:23] != 8'h00) a_m[23] <= 1'b1;
+if (b_r[30:23] != 8'h00) b_m[23] <= 1'b1;
+Stage 3 (counter=3) — Normalize inputs (rarely needed for normal numbers)
+verilog
+if (!a_m[23] && a_m != 0) begin a_m <= a_m << 1; a_e <= a_e - 10'd1; end
+if (!b_m[23] && b_m != 0) begin b_m <= b_m << 1; b_e <= b_e - 10'd1; end
+Stage 4 (counter=4) — Multiply core
+verilog
+z_s <= a_s ^ b_s;
+z_e <= a_e + b_e;           // NO extra +1 here
+product <= a_m * b_m;       // 48-bit product
+Stage 5 (counter=5) — Extract mantissa + rounding bits
+verilog
+// 48-bit product: check MSB for normalization shift
+if (product[47]) begin
+    z_m <= product[47:24];
+    guard_bit <= product[23];
+    round_bit <= product[22];
+    sticky <= |product[21:0];
+    z_e <= z_e + 10'd1;
+end else begin
+    z_m <= product[46:23];
+    guard_bit <= product[22];
+    round_bit <= product[21];
+    sticky <= |product[20:0];
+end
+Stage 6 (counter=6) — Normalize if needed
+verilog
+if (!z_m[23] && z_m != 0) begin
+    z_m <= {z_m[22:0], guard_bit};
+    guard_bit <= round_bit;
+    round_bit <= sticky;
+    sticky <= 1'b0;
+    z_e <= z_e - 10'd1;
+end
+Stage 7 (counter=7) — Round‑to‑nearest‑even + Pack
+verilog
+// Simple RNE rounding
+if (guard_bit && (round_bit || sticky || z_m[0])) begin
+    if (z_m == 24'hFFFFFF) begin
+        z_m <= 24'h800000;
+        z_e <= z_e + 10'd1;
+    end else begin
+        z_m <= z_m + 24'd1;
+    end
+end
 
-## Interface
+// Pack result
+if (result_is_nan) z <= {z_s, 8'hFF, 23'h400000};
+else if (result_is_zero) z <= {z_s, 31'b0};
+else if (result_is_inf) z <= {z_s, 8'hFF, 23'b0};
+else if ($signed(z_e) >= $signed(10'd128)) z <= {z_s, 8'hFF, 23'b0};
+else if ($signed(z_e) <= $signed(-10'd127)) z <= {z_s, 8'h00, z_m[22:0]};
+else z <= {z_s, (z_e + 10'd127)[7:0], z_m[22:0]};
+Critical Verilog rules (must follow)
+All pipeline assignments must use non‑blocking <=.
 
-### Ports
-| Port | Dir | Width | Description |
-|------|-----|-------|-------------|
-| `clk`   | in | 1 | Clock |
-| `rst`   | in | 1 | Async reset (posedge) |
-| `valid` | in | 1 | **1-cycle start pulse**; accepted only when not busy |
-| `a`     |  in | 32 | Operand A (FP32 bits) |
-| `b`     | in | 32 | Operand B (FP32 bits) |
-| `z`         | out | 32 | Result (FP32 bits) |
-| `out_valid` | out | 1 | **1-cycle pulse** when `z` is updated/valid |
+Use $signed() for any comparison involving z_e, a_e, b_e.
 
-### Handshake contract
-- When `busy==0`, a high `valid` on a rising edge **starts** an operation:
-  - `a` and `b` are **registered** into internal regs `a_r` and `b_r`.
-  - The FSM begins at `counter = 1`.
-- While `busy==1`, new `valid` pulses are **ignored**.
-- When the operation completes:
-  - `z` is updated,
-  - `out_valid` pulses high for 1 clock cycle,
-  - `busy` is cleared.
+Do not declare local reg variables inside the always block for pipeline values.
 
----
+The special‑case flags (result_is_zero, etc.) are already defined – just use them.
 
-## Latency and Throughput
+Example (1.0 × 1.0)
+Inputs: 3F800000 × 3F800000
 
-### Latency
-- Fixed latency of **7 stages**.
-- In this implementation the operation begins at stage `counter=1` and completes at `counter=7`.
-- `out_valid` asserts on the cycle where stage 7 packing finishes.
+After Stage 3: a_m = b_m = 24'h800000, a_e = b_e = 0
 
-A safe expectation for system-level timing is:
-- **`out_valid` occurs 7 clock cycles after the start edge** (the clock edge where `valid` was sampled when idle).
+Stage 4: product = 48'h400000000000
 
-### Throughput
-- **Not pipelined** (single-issue).
-- Max throughput is **1 result per 7 cycles** (assuming `valid` is asserted only when idle).
+Stage 5: product[47]=0 → z_m = 24'h800000, z_e = 0
 
----
+Final result must be 3F800000
 
-## Internal Data Model (IEEE-754 binary32)
-For each operand:
-- `sign` = bit 31
-- `exp`  = bits 30:23 (biased exponent)
-- `mant` = bits 22:0 (fraction)
+Common pitfalls to avoid
+Forgetting $signed() on exponent comparisons.
 
-Internal signals:
-- `a_s, b_s, z_s`: sign bits
-- `a_e, b_e, z_e`: signed exponent in *unbiased* domain (stored as 10-bit regs, used with `$signed`)
-- `a_m, b_m, z_m`: mantissas extended to 24-bit with hidden 1 when applicable
-- `product`: 50-bit product of mantissas
-- `guard_bit`, `round_bit`, `sticky`: rounding support bits for RNE
+Using blocking = in the pipeline stages.
 
----
+Wrong bit slicing in Stage 5 – always use the exact if (product[47]) pattern.
 
-## FSM / Pipeline Stages
-
-The FSM is controlled by:
-- `busy` (operation in progress)
-- `counter` (stage number 1..7)
-
-All stage actions are performed inside a single sequential always block using `case(counter)`.
-
-### Stage 1 — Unpack
-- Extract mantissas into 24-bit regs (initially `{1'b0, frac}`).
-- Convert biased exponent into unbiased form: `exp - 127`.
-- Capture signs.
-
-### Stage 2 — Special classification + denormal setup
-- Checks operand classes using `a_is_nan`, `a_is_inf`, `a_is_zero`, etc. (derived from `a_r/b_r` fields).
-- For normal operation:
-  - If exponent is nonzero => sets implicit leading 1: `a_m[23] = 1`.
-  - If exponent is zero (subnormal) => forces exponent to -126 (subnormal exponent baseline).
-
-> If you restrict inputs to **normal numbers only**, then:
-> - `expA` and `expB` are always 1..254,
-> - hidden-one insertion always happens,
-> - special logic is bypassed in practice.
-
-### Stage 3 — Input normalization (lightweight)
-- If mantissa MSB is not set, shift left and decrement exponent.
-- This is mainly relevant for denormal handling; for strictly normal inputs, this typically does nothing.
-
-### Stage 4 — Multiply core
-- Compute result sign: `z_s = a_s ^ b_s`
-- Exponent add: `z_e = a_e + b_e + 1`
-- Mantissa product: `product = a_m * b_m * 4`
-  - The `*4` scaling aligns the product for extraction into `{z_m, G, R, S}`.
-
-### Stage 5 — Extract mantissa + rounding bits
-- `z_m = product[49:26]`
-- `guard_bit = product[25]`
-- `round_bit = product[24]`
-- `sticky = OR(product[23:0])`
-
-### Stage 6 — Normalize + Round-to-Nearest-Even (RNE)
-
-
-> CRITICAL: All operations in this stage MUST use local temporary
-> variables with blocking assignments (=), not non-blocking (<=).
-> Copy z_m, z_e, guard_bit, round_bit, sticky into local regs first,
-> operate on those, then write back with <= at the end.
-> Using <= directly causes rounding to read stale values — the most
-> common failure mode for this design.
-
-Example pattern:
-    reg [23:0] zm_tmp = z_m;
-    reg [9:0]  ze_tmp = z_e;
-    // all logic uses zm_tmp, ze_tmp
-    z_m <= zm_tmp;
-    z_e <= ze_tmp;
-
-This stage performs in order:
-1. Underflow shift (right-shift mantissa, accumulate into sticky)
-2. Normalize if MSB missing (left-shift, carry guard into LSB)
-3. RNE: if G==1 and (R||S||LSB) then increment mantissa 
-### Stage 6 — Critical Implementation Note
-All computations in this stage MUST use local temporary variables
-with blocking assignments (=), NOT non-blocking (<=), so that
-normalization and rounding operate on updated values within
-the same clock cycle. Pattern:
-
-    reg [23:0] zm_tmp;
-    reg [9:0]  ze_tmp;
-    zm_tmp = z_m;   // blocking copy
-    ze_tmp = z_e;
-    // ... all operations on zm_tmp, ze_tmp ...
-    z_m <= zm_tmp;  // final non-blocking write back
-    z_e <= ze_tmp;
-
-Using <= directly for intermediate values will cause
-normalization and rounding to read stale values — the
-most common failure mode for this design.
-
-### Stage 7 — Pack
-- For normal path:
-  - Pack sign, biased exponent, fraction.
-  - If exponent indicates overflow -> output INF.
-  - If exponent indicates exact denorm boundary -> force exponent field to 0 (denormal/zero representation).
-- Asserts `out_valid` for one cycle and clears `busy`.
-
----
-
-## Assumptions & Constraints
-- Inputs: `exp ∈ [1..254]` (no zeros/subnormals, no inf/nan)
-
----
-
-## Verification Notes
-Recommended testbench behavior for this handshake design:
-- Drive `a/b` and pulse `valid` **synchronously** on clock edges.
-- Wait for `out_valid` before sampling `z`.
-- Generate only normal operands,
-
----
-
-ncp doc/spec.md doc/spec.md.bak
+Mixing intermediate/final values in Stage 7 – keep calculations simple.EOL
