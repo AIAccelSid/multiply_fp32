@@ -108,16 +108,43 @@ All stage actions are performed inside a single sequential always block using `c
 - `sticky = OR(product[23:0])`
 
 ### Stage 6 — Normalize + Round-to-Nearest-Even (RNE)
-This stage performs:
-1. **Underflow alignment** toward exponent -126:
-   - Computes shift amount `sh = (-126 - z_e)` when `z_e < -126`.
-   - Shifts mantissa right and accumulates shifted-out bits into sticky.
-2. **Normalize** if MSB missing:
-   - Left-shifts mantissa while adjusting exponent, carrying guard into LSB.
-3. **RNE rounding**:
-   - If `G == 1` and `(R || S || LSB)` then increment mantissa.
-   - Handles carry-out from rounding:
-     - If rounding overflows mantissa, set mantissa to 0x800000 and increment exponent.
+
+
+> CRITICAL: All operations in this stage MUST use local temporary
+> variables with blocking assignments (=), not non-blocking (<=).
+> Copy z_m, z_e, guard_bit, round_bit, sticky into local regs first,
+> operate on those, then write back with <= at the end.
+> Using <= directly causes rounding to read stale values — the most
+> common failure mode for this design.
+
+Example pattern:
+    reg [23:0] zm_tmp = z_m;
+    reg [9:0]  ze_tmp = z_e;
+    // all logic uses zm_tmp, ze_tmp
+    z_m <= zm_tmp;
+    z_e <= ze_tmp;
+
+This stage performs in order:
+1. Underflow shift (right-shift mantissa, accumulate into sticky)
+2. Normalize if MSB missing (left-shift, carry guard into LSB)
+3. RNE: if G==1 and (R||S||LSB) then increment mantissa 
+### Stage 6 — Critical Implementation Note
+All computations in this stage MUST use local temporary variables
+with blocking assignments (=), NOT non-blocking (<=), so that
+normalization and rounding operate on updated values within
+the same clock cycle. Pattern:
+
+    reg [23:0] zm_tmp;
+    reg [9:0]  ze_tmp;
+    zm_tmp = z_m;   // blocking copy
+    ze_tmp = z_e;
+    // ... all operations on zm_tmp, ze_tmp ...
+    z_m <= zm_tmp;  // final non-blocking write back
+    z_e <= ze_tmp;
+
+Using <= directly for intermediate values will cause
+normalization and rounding to read stale values — the
+most common failure mode for this design.
 
 ### Stage 7 — Pack
 - For normal path:
@@ -140,3 +167,5 @@ Recommended testbench behavior for this handshake design:
 - Generate only normal operands,
 
 ---
+
+ncp doc/spec.md doc/spec.md.bak
