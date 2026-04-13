@@ -9,6 +9,7 @@ This task is graded by cocotb + Icarus. Prioritize deterministic behavior and bi
 1. Correct `valid` / `out_valid` timing.
 2. Correct normal finite multiply path (including RNE).
 3. Correct overflow to infinity and obvious special cases.
+4. Never emit accidental nonzero on severe underflow.
 
 If you must simplify, keep finite normal-path math correct first.
 
@@ -80,8 +81,14 @@ Use this exact structure to avoid rounding bugs:
 8. Re-bias and pack:
    - `exp_biased = exp_unbiased_final + 127`
    - Overflow (`exp_biased >= 255`) -> signed Inf.
-   - Underflow (`exp_biased <= 0`) -> signed Zero is acceptable.
+   - Underflow (`exp_biased <= 0`) -> **signed Zero**.
+   - Do not emit subnormal outputs for this task unless you are sure they are correct.
    - Normal pack: `{sign_z, exp_biased[7:0], mantissa_rounded[22:0]}`
+
+### Critical anti-bug checks
+- If your output exponent field is `8'h00`, output fraction must be `23'd0` (signed zero only).
+- Common failure pattern: expected `0x00000000` but design returns tiny nonzero; guard against this explicitly in pack stage.
+- Common failure pattern: 1-ULP mismatch from stale/non-updated temporaries. In a clocked stage, compute with local temporaries using blocking assignments, then write final regs with nonblocking assignments.
 
 ## Practical implementation notes
 - Keep internal exponent as signed (`integer` or signed vector wide enough for intermediate values).
@@ -95,6 +102,8 @@ Run at least these directed checks before finalizing:
 - min normal x 0.5
 - NaN propagation
 - Inf x 0
+- very small normal x very small normal (expect zero in this task policy)
+- one tie-to-even style case to confirm RNE LSB behavior
 
 If any fail, fix RTL before final answer.
 

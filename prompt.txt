@@ -26,3 +26,7 @@ Implementation priority:
 1) deterministic handshake/timing correctness
 2) finite normal-path FP32 multiply correctness with integer RNE logic
 3) special-case handling (NaN/Inf/zero) without breaking (1) and (2)
+
+Important scoring hint:
+- Avoid underflow noise: if the final biased exponent is <= 0, output signed zero (exp=0, frac=0).
+- Do not return subnormal outputs unless you are highly confident the subnormal path is exact.
