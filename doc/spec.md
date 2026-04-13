@@ -1,109 +1,112 @@
-# fmultiplier — FP32 Multiplier (Handshake, Multi-Cycle, IEEE-754)
+# FP32 Multiplier Spec (Agent-Oriented)
 
-## Overview
-`fmultiplier` is a **multi-cycle** single-precision floating-point multiplier using a valid/out_valid handshake. It produces bit-accurate IEEE-754 results for **normal numbers only** (exponent 1–254). Special cases (subnormals/inf/NaN) can be ignored — the testbench uses only normal inputs.
+## Goal
+Implement `sources/multiply_fp32.sv` module `fmultiplier` as a synthesizable multi-cycle FP32 multiplier.
 
-The design must be a **7-stage pipeline** controlled by `counter` (1 to 7). `out_valid` asserts exactly 7 cycles after a `valid` pulse when idle.
+This task is graded by cocotb + Icarus. Prioritize deterministic behavior and bit-accurate finite multiplication with round-to-nearest-even (RNE).
 
-## Interface (do not change)
-```verilog
-module fmultiplier (
-    input wire clk,
-    input wire rst,
-    input wire valid,           // 1-cycle start pulse
-    input wire [31:0] a, b,
-    output reg [31:0] z,
-    output reg out_valid        // 1-cycle pulse when result ready
-);
-Pipeline Stages (follow exactly — use non‑blocking <=)
-Stage 1 (counter=1) — Unpack
-verilog
-a_s <= a_r[31]; b_s <= b_r[31];
-a_e <= $signed(a_r[30:23]) - 10'd127;
-b_e <= $signed(b_r[30:23]) - 10'd127;
-a_m <= {1'b0, a_r[22:0]};
-b_m <= {1'b0, b_r[22:0]};
-Stage 2 (counter=2) — Hidden bit
-verilog
-if (a_r[30:23] != 8'h00) a_m[23] <= 1'b1;
-if (b_r[30:23] != 8'h00) b_m[23] <= 1'b1;
-Stage 3 (counter=3) — Normalize inputs (rarely needed for normal numbers)
-verilog
-if (!a_m[23] && a_m != 0) begin a_m <= a_m << 1; a_e <= a_e - 10'd1; end
-if (!b_m[23] && b_m != 0) begin b_m <= b_m << 1; b_e <= b_e - 10'd1; end
-Stage 4 (counter=4) — Multiply core
-verilog
-z_s <= a_s ^ b_s;
-z_e <= a_e + b_e;           // NO extra +1 here
-product <= a_m * b_m;       // 48-bit product
-Stage 5 (counter=5) — Extract mantissa + rounding bits
-verilog
-// 48-bit product: check MSB for normalization shift
-if (product[47]) begin
-    z_m <= product[47:24];
-    guard_bit <= product[23];
-    round_bit <= product[22];
-    sticky <= |product[21:0];
-    z_e <= z_e + 10'd1;
-end else begin
-    z_m <= product[46:23];
-    guard_bit <= product[22];
-    round_bit <= product[21];
-    sticky <= |product[20:0];
-end
-Stage 6 (counter=6) — Normalize if needed
-verilog
-if (!z_m[23] && z_m != 0) begin
-    z_m <= {z_m[22:0], guard_bit};
-    guard_bit <= round_bit;
-    round_bit <= sticky;
-    sticky <= 1'b0;
-    z_e <= z_e - 10'd1;
-end
-Stage 7 (counter=7) — Round‑to‑nearest‑even + Pack
-verilog
-// Simple RNE rounding
-if (guard_bit && (round_bit || sticky || z_m[0])) begin
-    if (z_m == 24'hFFFFFF) begin
-        z_m <= 24'h800000;
-        z_e <= z_e + 10'd1;
-    end else begin
-        z_m <= z_m + 24'd1;
-    end
-end
+## What matters most for pass rate
+1. Correct `valid` / `out_valid` timing.
+2. Correct normal finite multiply path (including RNE).
+3. Correct overflow to infinity and obvious special cases.
+4. Never emit accidental nonzero on severe underflow.
 
-// Pack result
-if (result_is_nan) z <= {z_s, 8'hFF, 23'h400000};
-else if (result_is_zero) z <= {z_s, 31'b0};
-else if (result_is_inf) z <= {z_s, 8'hFF, 23'b0};
-else if ($signed(z_e) >= $signed(10'd128)) z <= {z_s, 8'hFF, 23'b0};
-else if ($signed(z_e) <= $signed(-10'd127)) z <= {z_s, 8'h00, z_m[22:0]};
-else z <= {z_s, (z_e + 10'd127)[7:0], z_m[22:0]};
-Critical Verilog rules (must follow)
-All pipeline assignments must use non‑blocking <=.
+If you must simplify, keep finite normal-path math correct first.
 
-Use $signed() for any comparison involving z_e, a_e, b_e.
+## Interface + timing contract
+- Inputs: `clk`, `rst`, `valid`, `a[31:0]`, `b[31:0]`
+- Outputs: `z[31:0]`, `out_valid`
 
-Do not declare local reg variables inside the always block for pipeline values.
+Rules:
+- Accept only when idle and `valid==1`.
+- Latch operands on acceptance.
+- Ignore new `valid` while busy.
+- Output exactly one-cycle `out_valid` pulse when result is ready.
+- Keep fixed deterministic latency.
 
-The special‑case flags (result_is_zero, etc.) are already defined – just use them.
+## Required numeric behavior
+For `x`:
+- `sign = x[31]`
+- `exp  = x[30:23]`
+- `frac = x[22:0]`
 
-Example (1.0 × 1.0)
-Inputs: 3F800000 × 3F800000
+Classes:
+- NaN: `exp==8'hFF && frac!=0`
+- Inf: `exp==8'hFF && frac==0`
+- Zero: `exp==0 && frac==0`
+- Normal: `1 <= exp <= 254`
+- Subnormal: `exp==0 && frac!=0`
 
-After Stage 3: a_m = b_m = 24'h800000, a_e = b_e = 0
+Special-case priority:
+1. NaN present -> quiet NaN (`32'h7FC00000` is fine).
+2. `Inf * 0` -> quiet NaN.
+3. Inf present -> signed Inf.
+4. Zero present -> signed Zero.
+5. Otherwise finite multiply.
 
-Stage 4: product = 48'h400000000000
+## Finite multiply algorithm (use integer datapath)
+Use this exact structure to avoid rounding bugs:
 
-Stage 5: product[47]=0 → z_m = 24'h800000, z_e = 0
+1. Sign:
+   - `sign_z = sign_a ^ sign_b`
 
-Final result must be 3F800000
+2. 24-bit significands:
+   - Normal operand: `{1'b1, frac}`
+   - Subnormal operand: `{1'b0, frac}` (supporting this is acceptable)
 
-Common pitfalls to avoid
-Forgetting $signed() on exponent comparisons.
+3. Unbiased exponent sum:
+   - Normal operand exponent contribution: `exp - 127`
+   - Subnormal contribution: `-126`
+   - `exp_sum = exp_a_unbiased + exp_b_unbiased`
 
-Using blocking = in the pipeline stages.
+4. Multiply significands:
+   - `prod = sig_a * sig_b` (48-bit)
 
-Wrong bit slicing in Stage 5 – always use the exact if (product[47]) pattern.
+5. Pre-normalize by top bit:
+   - If `prod[47]==1`, value is in `[2,4)`:
+     - increment exponent by 1
+     - take 24-bit candidate mantissa from `prod[47:24]` (includes hidden 1)
+     - `guard=prod[23]`, `round=prod[22]`, `sticky=|prod[21:0]`
+   - Else value is in `[1,2)`:
+     - mantissa candidate from `prod[46:23]`
+     - `guard=prod[22]`, `round=prod[21]`, `sticky=|prod[20:0]`
 
-Mixing intermediate/final values in Stage 7 – keep calculations simple.EOL
+6. RNE increment condition:
+   - `inc = guard && (round || sticky || mantissa_candidate[0])`
+   - `mantissa_rounded = mantissa_candidate + inc`
+
+7. Post-round renormalization:
+   - If `mantissa_rounded` overflows 24 bits, right-shift by 1 and increment exponent.
+
+8. Re-bias and pack:
+   - `exp_biased = exp_unbiased_final + 127`
+   - Overflow (`exp_biased >= 255`) -> signed Inf.
+   - Underflow (`exp_biased <= 0`) -> **signed Zero**.
+   - Do not emit subnormal outputs for this task unless you are sure they are correct.
+   - Normal pack: `{sign_z, exp_biased[7:0], mantissa_rounded[22:0]}`
+
+### Critical anti-bug checks
+- If your output exponent field is `8'h00`, output fraction must be `23'd0` (signed zero only).
+- Common failure pattern: expected `0x00000000` but design returns tiny nonzero; guard against this explicitly in pack stage.
+- Common failure pattern: 1-ULP mismatch from stale/non-updated temporaries. In a clocked stage, compute with local temporaries using blocking assignments, then write final regs with nonblocking assignments.
+
+## Practical implementation notes
+- Keep internal exponent as signed (`integer` or signed vector wide enough for intermediate values).
+- Keep all combinational math explicit; avoid real-number operations.
+- A small FSM (5-7 stages) is fine; one result at a time is acceptable.
+
+## Required self-check before final answer
+Run at least these directed checks before finalizing:
+- normal x normal random sweep
+- max finite x 2.0
+- min normal x 0.5
+- NaN propagation
+- Inf x 0
+- very small normal x very small normal (expect zero in this task policy)
+- one tie-to-even style case to confirm RNE LSB behavior
+
+If any fail, fix RTL before final answer.
+
+## Constraints
+- Synthesizable SystemVerilog only.
+- No SVA property/sequence syntax (Icarus compatibility).
