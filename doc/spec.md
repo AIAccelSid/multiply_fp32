@@ -37,6 +37,10 @@ Classes:
 - Normal: `1 <= exp <= 254`
 - Subnormal: `exp==0 && frac!=0`
 
+Benchmark simplification policy:
+- For this benchmark, you may treat subnormal **inputs** as zero-equivalent in the special-case path.
+- This is preferred over partially-correct subnormal arithmetic.
+
 Special-case priority:
 1. NaN present -> quiet NaN (`32'h7FC00000` is fine).
 2. `Inf * 0` -> quiet NaN.
@@ -52,11 +56,11 @@ Use this exact structure to avoid rounding bugs:
 
 2. 24-bit significands:
    - Normal operand: `{1'b1, frac}`
-   - Subnormal operand: `{1'b0, frac}` (supporting this is acceptable)
+   - If implementing full subnormals: subnormal operand `{1'b0, frac}`
+   - If using simplification policy: route subnormal inputs through zero/special handling instead.
 
-3. Unbiased exponent sum:
+3. Unbiased exponent sum (normal-path):
    - Normal operand exponent contribution: `exp - 127`
-   - Subnormal contribution: `-126`
    - `exp_sum = exp_a_unbiased + exp_b_unbiased`
 
 4. Multiply significands:
